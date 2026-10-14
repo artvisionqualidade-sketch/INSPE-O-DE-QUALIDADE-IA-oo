@@ -134,7 +134,7 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(brand)
         val subtitle=TextView(this).apply {
-            text="CONTROLE DE QUALIDADE / ESTAÇÃO DE INSPEÇÃO"
+            text="VISÃO COMPUTACIONAL / RECONHECIMENTO POR PADRÃO"
             textSize=10f; letterSpacing=.08f; setTextColor(Color.rgb(135,157,182))
             setPadding(dp(4),0,0,dp(16))
         }
@@ -199,7 +199,7 @@ class MainActivity : AppCompatActivity() {
     private fun showRegister(){
         root=base("Novo produto / padrão aprovado")
         val code=field("Código do produto"); val name=field("Nome do produto"); val color=field("Cor / referência")
-        addText("O padrão aprovado deve ser fotografado em condições controladas. A iluminação é parte do padrão.",14)
+        addText("Visão computacional: o app compara a peça com padrões visuais cadastrados. Use fundo simples, foco nítido e iluminação constante. Depois de salvar, ensine várias fotos CONFORMES de diferentes ângulos e cadastre exemplos reais de cada defeito.",14)
         val image=ImageView(this); image.layoutParams=LinearLayout.LayoutParams(-1,420); image.scaleType=ImageView.ScaleType.CENTER_INSIDE; root.addView(image)
         var standard:Bitmap?=null
         button("📷 Capturar padrão aprovado"){pendingStandardView={b->standard=b;image.setImageBitmap(b)};captureAction="standard";requestCamera()}
@@ -228,7 +228,7 @@ class MainActivity : AppCompatActivity() {
         root=base(if(existing==null)"Novo defeito" else "Configurar defeito")
         val name=field("Nome do defeito (ex.: Rebarba)"); val desc=field("Critério / regra de aceitação"); val threshold=field("Sensibilidade 0.10–1.00 (menor = mais rígida)"); val critical=CheckBox(this);critical.text="Defeito crítico — reprovar automaticamente quando confiança for suficiente";root.addView(critical)
         if(existing!=null){name.setText(existing.name);desc.setText(existing.rule);threshold.setText(existing.threshold.toString());critical.isChecked=existing.critical}
-        addText("Ensine este defeito com fotos reais e vídeo 360°. Exemplos: Rebarba, Risco, Trinca, Torpedo, Estufamento ou Fiapo. Dê um nome simples para cada padrão.",13)
+        addText("Padrão visual de defeito: ensine com várias fotos reais e vídeo 360°, incluindo diferentes ângulos e intensidades. O sistema compara características da imagem; ele não conhece um defeito que ainda não foi ensinado.",13)
         button("Salvar configuração"){val n=name.text.toString().trim();if(n.isEmpty()){toast("Informe o nome do defeito");return@button};val t=threshold.text.toString().toFloatOrNull()?.coerceIn(0.10f,1f)?:0.35f;val d=existing?:Defect(UUID.randomUUID().toString(),n,"",false,t,mutableListOf());d.name=n;d.rule=desc.text.toString();d.threshold=t;d.critical=critical.isChecked;if(existing==null)p.defects.add(d);store.saveProduct(p);showProductDetail(p)}
         if(existing!=null){
             button("📷 Ensinar NÃO CONFORME — tirar foto"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";requestCamera()}
@@ -672,15 +672,65 @@ class Store(private val a:android.content.Context=MainActivityContext.ctx){
 }
 
 object ML{
- fun features(src:Bitmap):List<Float>{val b=Bitmap.createScaledBitmap(src,64,64,true);val h=FloatArray(48);var lum=0f;var lum2=0f;var edge=0f;for(y in 0 until 64)for(x in 0 until 64){val c=b.getPixel(x,y);val r=Color.red(c)/255f;val g=Color.green(c)/255f;val bl=Color.blue(c)/255f;h[(r*15).toInt().coerceIn(0,15)]++;h[16+(g*15).toInt().coerceIn(0,15)]++;h[32+(bl*15).toInt().coerceIn(0,15)]++;val l=.299f*r+.587f*g+.114f*bl;lum+=l;lum2+=l*l;if(x>0){val q=b.getPixel(x-1,y);val pl=.299f*Color.red(q)/255f+.587f*Color.green(q)/255f+.114f*Color.blue(q)/255f;edge+=kotlin.math.abs(l-pl)}};val n=4096f;for(i in h.indices)h[i]/=n;return h.toList()+listOf(lum/n,lum2/n,edge/n,Color.red(b.getPixel(32,32))/255f,Color.green(b.getPixel(32,32))/255f,Color.blue(b.getPixel(32,32))/255f)}
+ // Descritor de visão computacional espacial (não é uma rede neural treinada):
+ // divide a imagem em 4x4 regiões e mede luminância, contraste e gradientes locais.
+ // Assim, preserva informação de forma/posição que um histograma global perde.
+ fun features(src:Bitmap):List<Float>{
+   val b=Bitmap.createScaledBitmap(src,128,128,true)
+   val pixels=Array(128){y->IntArray(128){x->b.getPixel(x,y)}}
+   val gray=Array(128){y->FloatArray(128){x->
+     val c=pixels[y][x];(.299f*Color.red(c)+.587f*Color.green(c)+.114f*Color.blue(c))/255f
+   }}
+   val out=mutableListOf<Float>()
+   var globalL=0f; var globalL2=0f; var globalEdge=0f
+   var red=0f; var green=0f; var blue=0f
+   for(y in 0 until 128) for(x in 0 until 128){
+     val c=pixels[y][x]; red+=Color.red(c)/255f; green+=Color.green(c)/255f; blue+=Color.blue(c)/255f
+     val l=gray[y][x]; globalL+=l; globalL2+=l*l
+     if(x>0)globalEdge+=kotlin.math.abs(l-gray[y][x-1])
+   }
+   val n=128f*128f
+   // 16 regiões espaciais; cada região tem média, desvio aproximado e gradientes X/Y.
+   for(gy in 0 until 4) for(gx in 0 until 4){
+     val x0=gx*32; val y0=gy*32
+     var sum=0f; var sum2=0f; var dx=0f; var dy=0f; var count=0
+     for(y in y0 until y0+32) for(x in x0 until x0+32){
+       val l=gray[y][x]; sum+=l; sum2+=l*l; count++
+       if(x<x0+31) dx+=kotlin.math.abs(l-gray[y][x+1])
+       if(y<y0+31) dy+=kotlin.math.abs(l-gray[y+1][x])
+     }
+     val m=sum/count.toFloat()
+     val variance=(sum2/count.toFloat()-m*m).coerceAtLeast(0f)
+     out.add(m)
+     out.add(kotlin.math.sqrt(variance))
+     out.add(dx/(32f*32f))
+     out.add(dy/(32f*32f))
+   }
+   out.add(red/n); out.add(green/n); out.add(blue/n)
+   out.add(globalL/n); out.add(globalEdge/(128f*127f))
+   return out
+ }
  private fun distance(a:List<Float>,b:List<Float>):Float{
    if(a.size!=b.size||a.isEmpty()||b.isEmpty()) return 1f
    var sum=0f
    for(i in a.indices){val delta=a[i]-b[i];sum+=delta*delta}
-   // Normaliza a distância para [0,1], para que possa ser convertida em similaridade.
-   return (sqrt(sum.toDouble()).toFloat()/3.5f).coerceIn(0f,1f)
+   // RMS por característica, normalizado para permitir comparação entre imagens.
+   return (sqrt((sum/a.size).toDouble()).toFloat()/0.30f).coerceIn(0f,1f)
  }
- fun productSimilarity(p:Product,b:Bitmap):Float{val f=features(b);val refs=mutableListOf<List<Float>>();if(p.standardFeatures.isNotEmpty())refs.add(p.standardFeatures);refs.addAll(p.okSamples);if(refs.isEmpty())return 1f;return (1f-refs.minOf{sample -> distance(f,sample)}).coerceIn(0f,1f)}
- fun findDefects(p:Product,b:Bitmap):List<Finding>{val f=features(b);return p.defects.mapNotNull{d->if(d.samples.isEmpty())null else {val dist=d.samples.minOf{sample -> distance(f,sample)};Finding(d.id,d.name,(1f-dist).coerceIn(0f,1f),d.threshold)}}}
+ fun productSimilarity(p:Product,b:Bitmap):Float{
+   val f=features(b);val refs=mutableListOf<List<Float>>()
+   if(p.standardFeatures.isNotEmpty())refs.add(p.standardFeatures)
+   refs.addAll(p.okSamples)
+   if(refs.isEmpty())return 0f
+   return (1f-refs.minOf{sample -> distance(f,sample)}).coerceIn(0f,1f)
+ }
+ fun findDefects(p:Product,b:Bitmap):List<Finding>{
+   val f=features(b)
+   return p.defects.mapNotNull{d->if(d.samples.isEmpty())null else {
+     val dist=d.samples.minOf{sample -> distance(f,sample)}
+     Finding(d.id,d.name,(1f-dist).coerceIn(0f,1f),d.threshold)
+   }}
+ }
 }
+
 object MainActivityContext{lateinit var ctx:android.content.Context}
