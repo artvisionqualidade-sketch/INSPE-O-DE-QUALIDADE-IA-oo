@@ -31,6 +31,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var beacon: TextView
     private lateinit var store: Store
     private var captureAction = "inspection"
+    // null = foto da galeria/sem verificação de contorno; false = câmera não localizou o produto com segurança.
+    private var capturedImageScanDetected: Boolean? = null
     private var liveRequested = false
     private var videoRequested = false
     private var pendingVideoTrainingType = ""
@@ -64,11 +66,14 @@ class MainActivity : AppCompatActivity() {
                     val defectId = data?.getStringExtra(CameraXCaptureActivity.EXTRA_TRAIN_DEFECT_ID)
                     if (p == null) toast("Selecione um produto antes de analisar o vídeo")
                     else if (trainingType.isNotBlank()) trainFromRecordedVideo(p, videoPath, trainingType, defectId)
-                    else analyzeRecordedVideo(p, videoPath)
+                    else analyzeRecordedVideo(p, videoPath, data?.getBooleanExtra(CameraXCaptureActivity.EXTRA_VIDEO_OBJECT_DETECTED, false) == true)
                 } else {
                     val path = data?.getStringExtra(CameraXCaptureActivity.EXTRA_IMAGE_PATH)
+                    capturedImageScanDetected = if (captureAction == "inspection" && data?.hasExtra(CameraXCaptureActivity.EXTRA_IMAGE_OBJECT_DETECTED) == true) {
+                        data.getBooleanExtra(CameraXCaptureActivity.EXTRA_IMAGE_OBJECT_DETECTED, false)
+                    } else null
                     val bmp = path?.let { BitmapFactory.decodeFile(it) }
-                    if (bmp != null) onCaptured(bmp) else { setStatus(Status.WAITING); toast("Não foi possível carregar a foto capturada") }
+                    if (bmp != null) onCaptured(bmp) else { capturedImageScanDetected = null; setStatus(Status.WAITING); toast("Não foi possível carregar a foto capturada") }
                 }
             }
         } else setStatus(Status.WAITING)
@@ -76,6 +81,7 @@ class MainActivity : AppCompatActivity() {
     private val gallery = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             try {
+                capturedImageScanDetected = null
                 val bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
                 if (bmp != null) onCaptured(bmp) else toast("Não foi possível abrir essa imagem")
             } catch (e: Exception) {
@@ -88,6 +94,7 @@ class MainActivity : AppCompatActivity() {
     private val photoPicker = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
         if (uri != null) {
             try {
+                capturedImageScanDetected = null
                 val bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
                 if (bmp != null) onCaptured(bmp) else toast("Não foi possível abrir essa imagem")
             } catch (e: Exception) {
@@ -219,8 +226,8 @@ class MainActivity : AppCompatActivity() {
         addText("Exemplos de defeitos do padrão-base: rebarba, ponto de injeção/torpedo, riscos, trincas/falhas, estufamento, rosca, fiapos/películas. Você pode criar outros.",13)
         button("Salvar configuração"){val n=name.text.toString().trim();if(n.isEmpty()){toast("Informe o nome do defeito");return@button};val t=threshold.text.toString().toFloatOrNull()?.coerceIn(0.10f,1f)?:0.35f;val d=existing?:Defect(UUID.randomUUID().toString(),n,"",false,t,mutableListOf());d.name=n;d.rule=desc.text.toString();d.threshold=t;d.critical=critical.isChecked;if(existing==null)p.defects.add(d);store.saveProduct(p);showProductDetail(p)}
         if(existing!=null){
-            button("📷 Ensinar este defeito (câmera)"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";requestCamera()}
-            button("🖼️ Ensinar este defeito (galeria / Google Fotos)"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";chooseGallery()}
+            button("📷 Capturar foto de NÃO CONFORME"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";requestCamera()}
+            button("🖼️ Adicionar foto de NÃO CONFORME"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";chooseGallery()}
             button("🎥 Gravar defeito ${existing.name} em 360°"){selectedProduct=p;launchVideoTraining("train_defect", existing.id)}
         }
         back()
@@ -292,6 +299,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun inspect(p:Product,bmp:Bitmap){
         setStatus(Status.WAITING)
+        if (capturedImageScanDetected == false) {
+            capturedImageScanDetected = null
+            resultDialog(Status.ATTENTION, "Contorno não identificado", "A câmera não conseguiu delimitar o produto com segurança. Melhore o contraste com o fundo, ajuste o foco/iluminação e capture novamente. A imagem não será aprovada automaticamente.")
+            return
+        }
+        capturedImageScanDetected = null
         // Regra conservadora: sem padrão ou sem exemplos de TODOS os defeitos cadastrados,
         // o app não pode liberar a peça como conforme.
         if (p.standardFeatures.isEmpty() && p.okSamples.isEmpty()) {
@@ -434,8 +447,13 @@ private fun showRules() {
         }.start()
     }
 
-    private fun analyzeRecordedVideo(p: Product, path: String) {
+    private fun analyzeRecordedVideo(p: Product, path: String, objectDetected: Boolean) {
         setStatus(Status.WAITING)
+        if (!objectDetected) {
+            try { File(path).delete() } catch (_: Exception) {}
+            resultDialog(Status.ATTENTION, "Contorno do produto não confirmado", "A câmera não conseguiu identificar o contorno do produto de forma consistente durante a gravação. O vídeo não será aprovado automaticamente. Grave novamente com fundo contrastante, boa iluminação e a peça inteira enquadrada.")
+            return
+        }
         if (p.standardFeatures.isEmpty() && p.okSamples.isEmpty()) {
             try { File(path).delete() } catch (_: Exception) {}
             resultDialog(Status.ATTENTION, "Padrão não treinado", "Cadastre o padrão do produto antes de analisar o vídeo.")

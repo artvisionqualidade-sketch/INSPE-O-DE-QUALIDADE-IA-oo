@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
@@ -69,6 +70,8 @@ class CameraXCaptureActivity : AppCompatActivity() {
     private var recording: Recording? = null
     private var actionButton: Button? = null
     private var lastAnalysisMs = 0L
+    @Volatile private var scanFrameCount = 0
+    @Volatile private var scanDetectedFrameCount = 0
     private var latestStatus = "ATTENTION"
     private var latestReason = "Aguardando análise de imagem"
     private var analysis: ImageAnalysis? = null
@@ -173,17 +176,34 @@ class CameraXCaptureActivity : AppCompatActivity() {
                         .build()
                     val videoUseCase = VideoCapture.withOutput(recorder)
                     videoCapture = videoUseCase
-                    boundCamera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, videoUseCase)
+                    val visualAnalysis = createVisualAnalysis()
+                    analysis = visualAnalysis
+                    try {
+                        // Preview + vídeo + análise: mostra o contorno estimado durante a gravação 360°.
+                        boundCamera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, videoUseCase, visualAnalysis)
+                    } catch (_: Exception) {
+                        // Alguns aparelhos não suportam os três use cases simultaneamente.
+                        analysis?.clearAnalyzer()
+                        analysis = null
+                        boundCamera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, videoUseCase)
+                        runOnUiThread { detail.text = "Gravação 360° ativa. A detecção de contorno ao vivo não está disponível nesta combinação de câmera." }
+                    }
                 } else if (liveMode) {
-                    analysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                        .build().also { useCase ->
-                            useCase.setAnalyzer(cameraExecutor) { image -> analyzeFrame(image) }
-                        }
-                    boundCamera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                    val visualAnalysis = createVisualAnalysis()
+                    analysis = visualAnalysis
+                    boundCamera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, visualAnalysis)
                 } else {
-                    boundCamera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+                    // Tenta manter a captura de foto e o contorno visual ativos ao mesmo tempo.
+                    val visualAnalysis = createVisualAnalysis()
+                    analysis = visualAnalysis
+                    try {
+                        boundCamera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture, visualAnalysis)
+                    } catch (_: Exception) {
+                        analysis?.clearAnalyzer()
+                        analysis = null
+                        boundCamera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
+                        runOnUiThread { detail.text = "Câmera pronta. O contorno automático não está disponível neste aparelho neste modo." }
+                    }
                 }
                 cameraReady = true
                 actionButton?.isEnabled = true
@@ -197,6 +217,15 @@ class CameraXCaptureActivity : AppCompatActivity() {
                 setResult(Activity.RESULT_CANCELED); finish()
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun createVisualAnalysis(): ImageAnalysis {
+        return ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .build().also { useCase ->
+                useCase.setAnalyzer(cameraExecutor) { image -> analyzeFrame(image) }
+            }
     }
 
     private fun toggleTorch(button: Button) {
@@ -267,6 +296,7 @@ class CameraXCaptureActivity : AppCompatActivity() {
         val knownMm = pendingCalibrationMm
         if (knownMm != null) {
             millimetersPerPixel = knownMm / pixels
+            gridOverlay.setMeasurementScale(millimetersPerPixel)
             pendingCalibrationMm = null
             Toast.makeText(this, "Escala calibrada: ${String.format(java.util.Locale.getDefault(), "%.4f", millimetersPerPixel)} mm/pixel", Toast.LENGTH_LONG).show()
             detail.text = "Escala calibrada. Para medir, mantenha distância e plano iguais; se mover a câmera, calibre novamente."
@@ -313,8 +343,10 @@ class CameraXCaptureActivity : AppCompatActivity() {
                             button.text = "● TENTAR NOVAMENTE"
                             Toast.makeText(this, "Erro ao gravar vídeo: ${event.error}", Toast.LENGTH_LONG).show()
                         } else {
+                            val scanRatio = if (scanFrameCount > 0) scanDetectedFrameCount.toFloat() / scanFrameCount.toFloat() else 0f
                             val result = Intent()
                                 .putExtra(EXTRA_VIDEO_PATH, file.absolutePath)
+                                .putExtra(EXTRA_VIDEO_OBJECT_DETECTED, scanFrameCount >= 3 && scanRatio >= 0.50f)
                                 .putExtra(EXTRA_VIDEO_TRAIN_TYPE, intent.getStringExtra(EXTRA_VIDEO_TRAIN_TYPE) ?: "")
                                 .putExtra(EXTRA_TRAIN_DEFECT_ID, intent.getStringExtra(EXTRA_TRAIN_DEFECT_ID) ?: "")
                             setResult(Activity.RESULT_OK, result)
@@ -330,30 +362,128 @@ class CameraXCaptureActivity : AppCompatActivity() {
     }
 
     private fun analyzeFrame(image: ImageProxy) {
+        var bitmap: Bitmap? = null
         try {
             val now = System.currentTimeMillis()
-            if (!liveMode || now - lastAnalysisMs < 450) return
+            if (now - lastAnalysisMs < 450) return
             lastAnalysisMs = now
-            val bitmap = rgbaToBitmap(image)
-            val features = ML.features(bitmap)
-            val result = liveModel.classify(features)
-            runOnUiThread {
-                latestStatus = result.first
-                latestReason = result.second
-                val (label, bg) = when (latestStatus) {
-                    "OK" -> "🟢  CONFORME" to 0xFF197A45.toInt()
-                    "BAD" -> "🔴  NÃO CONFORME" to 0xFFB3261E.toInt()
-                    else -> "🟡  PRECISA DE AVALIAÇÃO" to 0xFF9A6700.toInt()
-                }
-                statusLight.text = label
-                statusLight.setBackgroundColor(bg)
-                detail.text = "$latestReason\nAnálise contínua ativa • resultado preliminar"
+            val frameBitmap = rgbaToBitmap(image)
+            bitmap = frameBitmap
+
+            // Estima o contorno do objeto em relação ao fundo. É uma ajuda de enquadramento,
+            // não um modelo industrial treinado de segmentação de peças.
+            val bounds = estimateProductBounds(frameBitmap)
+            if (videoMode || !liveMode) {
+                scanFrameCount += 1
+                if (bounds != null) scanDetectedFrameCount += 1
             }
-            bitmap.recycle()
+            runOnUiThread {
+                gridOverlay.setObjectBounds(bounds)
+                gridOverlay.setMeasurementScale(millimetersPerPixel)
+                if (!liveMode) {
+                    detail.text = if (bounds != null) {
+                        val w = (bounds.right - bounds.left) * gridOverlay.width
+                        val h = (bounds.bottom - bounds.top) * gridOverlay.height
+                        val scale = millimetersPerPixel
+                        val dimensionText = if (scale != null) {
+                            " • dimensões estimadas ${(w * scale).formatCamera()} × ${(h * scale).formatCamera()} mm"
+                        } else {
+                            " • calibre com referência conhecida para estimar mm"
+                        }
+                        "Contorno estimado em verde$dimensionText. Verifique o enquadramento e a calibração."
+                    } else {
+                        "Contorno não identificado com segurança. Use fundo contrastante, aproxime a peça inteira e melhore a iluminação."
+                    }
+                }
+            }
+
+            if (liveMode) {
+                val result = if (bounds == null) {
+                    "ATTENTION" to "Contorno do produto não identificado com segurança. Ajuste o fundo, foco e iluminação; não aprove automaticamente."
+                } else {
+                    liveModel.classify(ML.features(frameBitmap))
+                }
+                runOnUiThread {
+                    latestStatus = result.first
+                    latestReason = result.second
+                    val (label, bg) = when (latestStatus) {
+                        "OK" -> "🟢  CONFORME" to 0xFF197A45.toInt()
+                        "BAD" -> "🔴  NÃO CONFORME" to 0xFFB3261E.toInt()
+                        else -> "🟡  PRECISA DE AVALIAÇÃO" to 0xFF9A6700.toInt()
+                    }
+                    statusLight.text = label
+                    statusLight.setBackgroundColor(bg)
+                    detail.text = "$latestReason\\nAnálise contínua ativa • resultado preliminar"
+                }
+            }
         } catch (_: Exception) {
-            runOnUiThread { statusLight.text = "🟡  PRECISA DE AVALIAÇÃO"; detail.text = "Não foi possível analisar este quadro. Ajuste o foco e a iluminação." }
-        } finally { image.close() }
+            runOnUiThread {
+                if (liveMode) statusLight.text = "🟡  PRECISA DE AVALIAÇÃO"
+                detail.text = "Não foi possível analisar este quadro. Ajuste o foco e a iluminação."
+            }
+        } finally {
+            bitmap?.recycle()
+            image.close()
+        }
     }
+
+    private fun estimateProductBounds(bitmap: Bitmap): RectF? {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 20 || h < 20) return null
+
+        // Usa os cantos como estimativa do fundo. O resultado varia conforme cor e iluminação.
+        val corners = intArrayOf(
+            bitmap.getPixel(3, 3), bitmap.getPixel(w - 4, 3),
+            bitmap.getPixel(3, h - 4), bitmap.getPixel(w - 4, h - 4)
+        )
+        val bgR = corners.map { Color.red(it) }.average().toFloat()
+        val bgG = corners.map { Color.green(it) }.average().toFloat()
+        val bgB = corners.map { Color.blue(it) }.average().toFloat()
+
+        var minX = w
+        var minY = h
+        var maxX = -1
+        var maxY = -1
+        var count = 0
+        val xStart = (w * 0.04f).toInt()
+        val xEnd = (w * 0.96f).toInt()
+        val yStart = (h * 0.04f).toInt()
+        val yEnd = (h * 0.96f).toInt()
+
+        for (y in yStart until yEnd step 2) {
+            for (x in xStart until xEnd step 2) {
+                val c = bitmap.getPixel(x, y)
+                val dr = Color.red(c) - bgR
+                val dg = Color.green(c) - bgG
+                val db = Color.blue(c) - bgB
+                val delta = sqrt((dr * dr + dg * dg + db * db).toDouble()).toFloat()
+                if (delta > 48f) {
+                    minX = minOf(minX, x)
+                    minY = minOf(minY, y)
+                    maxX = maxOf(maxX, x)
+                    maxY = maxOf(maxY, y)
+                    count++
+                }
+            }
+        }
+
+        val boxW = maxX - minX
+        val boxH = maxY - minY
+        val total = (w / 2) * (h / 2)
+        if (count < total * 0.015f || boxW < w * 0.12f || boxH < h * 0.12f) return null
+        if (boxW * boxH > w * h * 0.94f) return null
+
+        return RectF(
+            (minX.toFloat() / w).coerceIn(0f, 1f),
+            (minY.toFloat() / h).coerceIn(0f, 1f),
+            (maxX.toFloat() / w).coerceIn(0f, 1f),
+            (maxY.toFloat() / h).coerceIn(0f, 1f)
+        )
+    }
+
+    private fun Float.formatCamera(): String =
+        String.format(java.util.Locale.getDefault(), "%.1f", this)
 
     private fun rgbaToBitmap(image: ImageProxy): Bitmap {
         val plane = image.planes[0]
@@ -388,7 +518,11 @@ class CameraXCaptureActivity : AppCompatActivity() {
         val options = ImageCapture.OutputFileOptions.Builder(outputFile).build()
         imageCapture.takePicture(options, ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                setResult(Activity.RESULT_OK, Intent().putExtra(EXTRA_IMAGE_PATH, outputFile.absolutePath)); finish()
+                val scanRatio = if (scanFrameCount > 0) scanDetectedFrameCount.toFloat() / scanFrameCount.toFloat() else 0f
+                setResult(Activity.RESULT_OK, Intent()
+                    .putExtra(EXTRA_IMAGE_PATH, outputFile.absolutePath)
+                    .putExtra(EXTRA_IMAGE_OBJECT_DETECTED, scanFrameCount >= 3 && scanRatio >= 0.50f))
+                finish()
             }
             override fun onError(exception: ImageCaptureException) {
                 Toast.makeText(this@CameraXCaptureActivity, "Falha ao capturar foto: ${exception.message ?: "erro desconhecido"}", Toast.LENGTH_LONG).show()
@@ -407,6 +541,8 @@ class CameraXCaptureActivity : AppCompatActivity() {
         const val EXTRA_IMAGE_PATH = "qualiinsp.image_path"
         const val EXTRA_VIDEO_MODE = "qualiinsp.video_mode"
         const val EXTRA_VIDEO_PATH = "qualiinsp.video_path"
+        const val EXTRA_VIDEO_OBJECT_DETECTED = "qualiinsp.video_object_detected"
+        const val EXTRA_IMAGE_OBJECT_DETECTED = "qualiinsp.image_object_detected"
         const val EXTRA_VIDEO_TRAIN_TYPE = "qualiinsp.video_train_type"
         const val EXTRA_TRAIN_DEFECT_ID = "qualiinsp.train_defect_id"
         const val EXTRA_LIVE_MODE = "qualiinsp.live_mode"
@@ -479,8 +615,25 @@ private class GridOverlayView(context: android.content.Context) : View(context) 
         strokeWidth = 4f
         style = Paint.Style.STROKE
     }
+    private val objectPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(50, 255, 110)
+        strokeWidth = 4f
+        style = Paint.Style.STROKE
+    }
+    private val labelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(50, 255, 110)
+        textSize = 14f * resources.displayMetrics.density
+        style = Paint.Style.FILL
+        typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)
+    }
+    private val labelBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xCC07130B.toInt()
+        style = Paint.Style.FILL
+    }
     private var pointA: Pair<Float, Float>? = null
     private var pointB: Pair<Float, Float>? = null
+    private var objectBounds: RectF? = null
+    private var scaleMmPerPixel: Float? = null
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
@@ -493,6 +646,38 @@ private class GridOverlayView(context: android.content.Context) : View(context) 
             canvas.drawLine(0f, y, w, y, gridPaint)
         }
         canvas.drawRect(w * .08f, h * .08f, w * .92f, h * .92f, gridPaint)
+
+        objectBounds?.let { b ->
+            val left = b.left * w
+            val top = b.top * h
+            val right = b.right * w
+            val bottom = b.bottom * h
+            canvas.drawRect(left, top, right, bottom, objectPaint)
+            val scale = scaleMmPerPixel
+            val dimensions = if (scale != null && scale > 0f) {
+                " ${(right - left).times(scale).formatCamera()} × ${(bottom - top).times(scale).formatCamera()} mm*"
+            } else {
+                " calibre para mm"
+            }
+            val label = "PRODUTO • CONTORNO ESTIMADO$dimensions"
+            val padding = 7f * resources.displayMetrics.density
+            val labelWidth = labelPaint.measureText(label).coerceAtMost(w - padding * 2)
+            val labelY = if (top > labelPaint.textSize + padding * 2) top - padding else bottom + labelPaint.textSize + padding
+            canvas.drawRoundRect(
+                left.coerceIn(0f, w - labelWidth - padding * 2),
+                (labelY - labelPaint.textSize - padding).coerceIn(0f, h - labelPaint.textSize - padding),
+                (left + labelWidth + padding * 2).coerceAtMost(w),
+                labelY.coerceIn(labelPaint.textSize + padding, h),
+                6f, 6f, labelBackgroundPaint
+            )
+            canvas.drawText(
+                label,
+                left.coerceIn(0f, w - labelWidth - padding * 2) + padding,
+                labelY.coerceIn(labelPaint.textSize + padding, h) - padding / 2,
+                labelPaint
+            )
+        }
+
         val a = pointA
         val b = pointB
         if (a != null) canvas.drawCircle(a.first, a.second, 9f, pointPaint)
@@ -500,6 +685,16 @@ private class GridOverlayView(context: android.content.Context) : View(context) 
             canvas.drawLine(a.first, a.second, b.first, b.second, pointPaint)
             canvas.drawCircle(b.first, b.second, 9f, pointPaint)
         }
+    }
+
+    fun setObjectBounds(bounds: RectF?) {
+        objectBounds = bounds
+        invalidate()
+    }
+
+    fun setMeasurementScale(scale: Float?) {
+        scaleMmPerPixel = scale
+        invalidate()
     }
 
     fun setMeasurePoints(ax: Float, ay: Float, bx: Float?, by: Float?) {
@@ -514,3 +709,6 @@ private class GridOverlayView(context: android.content.Context) : View(context) 
         invalidate()
     }
 }
+
+private fun Float.formatCamera(): String =
+    String.format(java.util.Locale.getDefault(), "%.1f", this)

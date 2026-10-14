@@ -19,3 +19,15 @@
 ## Limites técnicos importantes
 
 A grade é uma sobreposição visual de referência; ela não representa, por si só, segmentação automática do produto nem localização garantida de rebarbas. O classificador atual compara características visuais simples com exemplos cadastrados, não é um modelo industrial treinado/validado. A medição em milímetros é uma estimativa manual que exige referência conhecida no mesmo plano e distância; dimensões críticas devem ser confirmadas com instrumentos calibrados. Valide com um conjunto real de peças boas e defeituosas antes de usar para decisões de produção.
+
+
+## Melhorias de câmera e enquadramento
+
+- A câmera oferece captura de foto para ensinar exemplos conformes e não conformes e gravação multiângulo/360° para treinamento e inspeção.
+- O controle FLASH liga/desliga a lanterna quando o aparelho disponibiliza flash.
+- A grade pode ser ativada/desativada e a ferramenta MEDIR permite calibrar uma escala com referência física conhecida.
+- Foi acrescentado um retângulo verde de contorno estimado, calculado por contraste entre o produto e os cantos do fundo. É uma heurística de enquadramento, não um detector de objetos treinado e não garante que toda a peça esteja segmentada corretamente.
+- A inspeção ao vivo e a análise de vídeo ficam em ATENÇÃO quando o contorno não é identificado com consistência. Isso reduz aprovações automáticas em capturas inadequadas, mas pode exigir nova captura com fundo contrastante e boa iluminação.
+- As dimensões mostradas são estimativas dependentes de calibração, distância, perspectiva e plano da peça. Para cotas industriais críticas, confirme com instrumento calibrado.
+
+O APK não foi compilado nem validado em aparelho nesta entrega. Execute o GitHub Actions do repositório para verificar a compilação e teste com amostras conhecidas antes de uso produtivo.
