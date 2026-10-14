@@ -215,8 +215,8 @@ class MainActivity : AppCompatActivity() {
         addText("GRAVAÇÃO 360° — mostre frente, verso, laterais, topo, base e detalhes.", 14)
         button("🎥 GRAVAR PADRÃO CONFORME EM 360°"){selectedProduct=p;launchVideoTraining("train_ok", null)}
         button("🎥 GRAVAR PRODUTO EM 360° E INSPECIONAR TODOS OS ÂNGULOS"){selectedProduct=p;showInspectionFor(p)}
-        button("＋ Configurar novo defeito"){showDefectEditor(p,null)}
-        if(p.defects.isEmpty()) addText("Ainda não há defeitos configurados. Crie um defeito e depois ensine a IA com exemplos reais.")
+        button("＋ Criar padrão de NÃO CONFORMIDADE"){showDefectEditor(p,null)}
+        if(p.defects.isEmpty()) addText("Crie um padrão para cada defeito (ex.: Rebarba, Risco ou Trinca). Depois ensine com fotos da câmera, galeria/Google Fotos e gravação 360°.")
         p.defects.forEach{d->button("${if(d.critical) "🔴" else "🟡"} ${d.name}\nExemplos: ${d.samples.size} • Tolerância ou Limite: ${d.threshold}"){showDefectEditor(p,d)}}
         button("📷 Ensinar CONFORME (câmera)"){selectedProduct=p;captureAction="train_ok";requestCamera()}
         button("🖼️ Ensinar CONFORME (galeria / Google Fotos)"){selectedProduct=p;captureAction="train_ok";chooseGallery()}
@@ -228,12 +228,13 @@ class MainActivity : AppCompatActivity() {
         root=base(if(existing==null)"Novo defeito" else "Configurar defeito")
         val name=field("Nome do defeito (ex.: Rebarba)"); val desc=field("Critério / regra de aceitação"); val threshold=field("Sensibilidade 0.10–1.00 (menor = mais rígida)"); val critical=CheckBox(this);critical.text="Defeito crítico — reprovar automaticamente quando confiança for suficiente";root.addView(critical)
         if(existing!=null){name.setText(existing.name);desc.setText(existing.rule);threshold.setText(existing.threshold.toString());critical.isChecked=existing.critical}
-        addText("Exemplos de defeitos do padrão-base: rebarba, ponto de injeção/torpedo, riscos, trincas/falhas, estufamento, rosca, fiapos/películas. Você pode criar outros.",13)
+        addText("Ensine este defeito com fotos reais e vídeo 360°. Exemplos: Rebarba, Risco, Trinca, Torpedo, Estufamento ou Fiapo. Dê um nome simples para cada padrão.",13)
         button("Salvar configuração"){val n=name.text.toString().trim();if(n.isEmpty()){toast("Informe o nome do defeito");return@button};val t=threshold.text.toString().toFloatOrNull()?.coerceIn(0.10f,1f)?:0.35f;val d=existing?:Defect(UUID.randomUUID().toString(),n,"",false,t,mutableListOf());d.name=n;d.rule=desc.text.toString();d.threshold=t;d.critical=critical.isChecked;if(existing==null)p.defects.add(d);store.saveProduct(p);showProductDetail(p)}
         if(existing!=null){
-            button("📷 Capturar foto de NÃO CONFORME"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";requestCamera()}
-            button("🖼️ Adicionar foto de NÃO CONFORME"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";chooseGallery()}
-            button("🎥 Gravar defeito ${existing.name} em 360°"){selectedProduct=p;launchVideoTraining("train_defect", existing.id)}
+            button("📷 Ensinar NÃO CONFORME — tirar foto"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";requestCamera()}
+            button("🖼️ Ensinar NÃO CONFORME — galeria / Google Fotos"){selectedProduct=p;selectedDefectId=existing.id;captureAction="train_defect";chooseGallery()}
+            button("🎥 Ensinar NÃO CONFORME — gravar ${existing.name} em 360°"){selectedProduct=p;launchVideoTraining("train_defect", existing.id)}
+            addText("Exemplos deste padrão: ${existing.samples.size}. Adicione fotos e grave a peça dando a volta completa para ensinar outros ângulos.",12)
         }
         back()
     }
@@ -331,10 +332,16 @@ class MainActivity : AppCompatActivity() {
         val critical=findings.filter{it.confidence>=it.threshold&&p.defects.firstOrNull{d->d.id==it.id}?.critical==true}
         val probable=findings.filter{it.confidence>=it.threshold}
         val status=when{critical.isNotEmpty()||probable.isNotEmpty()->Status.BAD;productScore<0.60f||findings.any{it.confidence>=it.threshold*0.75f}->Status.ATTENTION;else->Status.OK}
-        val reason=when{critical.isNotEmpty()->"Defeito crítico: ${critical.joinToString{it.name}}";probable.isNotEmpty()->"Defeito: ${probable.joinToString{it.name}}";status==Status.OK->"Nenhum dos defeitos treinados foi reconhecido nesta imagem; isso não garante ausência de defeitos não cadastrados.";else->"Resultado inconclusivo"}
+        val defectNames=(if(critical.isNotEmpty()) critical else probable).map{it.name}.distinct()
+        val reason=when {
+            status==Status.BAD -> "Produto não conforme — defeito identificado: ${defectNames.joinToString()}."
+            status==Status.OK -> "Produto conforme — sem avarias detectadas."
+            else -> "Resultado inconclusivo — avaliar a peça."
+        }
         setStatus(status)
         val now=SimpleDateFormat("yyyy-MM-dd HH:mm:ss",Locale.getDefault()).format(Date());store.addInspection(Inspection(now,p.code,p.name,status.name,reason,productScore,currentMeta.lot,currentMeta.machine,currentMeta.mold,currentMeta.cavity))
-        resultDialog(status,"Resultado da IA",reason+"\n\nSimilaridade do produto: ${fmt(productScore)}\n\nA grade é uma referência visual; a medição é estimada e depende de calibração. Dimensões críticas devem ser confirmadas com instrumento calibrado.")
+        val note=if(status==Status.OK) "\n\nA análise não substitui a inspeção dos critérios críticos e defeitos que não foram ensinados." else ""
+        resultDialog(status,"Resultado da inspeção",reason+note)
     }
 
     private fun resultDialog(status:Status,title:String,msg:String){setStatus(status);AlertDialog.Builder(this).setTitle(title).setMessage(msg).setPositiveButton("OK"){_,_->showHome()}.setCancelable(false).show()}
@@ -514,16 +521,17 @@ private fun showRules() {
                 defectHits.isNotEmpty() -> {
                     finalStatus = Status.BAD
                     val names = defectHits.keys.mapNotNull { defectNames[it] }.distinct()
-                    reason = "Possível não conformidade em ${defectHits.values.sum()} quadro(s): ${names.joinToString()}. Revise as imagens/peça antes da decisão final."
+                    reason = "Produto não conforme — defeito identificado: ${names.joinToString()}."
                 }
                 decodeErrors || minSimilarity < 0.60f -> { finalStatus = Status.ATTENTION; reason = "Análise inconclusiva: alguns quadros não foram lidos ou variaram muito do padrão. Reinspecione os ângulos indicados." }
-                else -> { finalStatus = Status.OK; reason = "Nenhum defeito cadastrado foi reconhecido nos $frameCount quadros analisados. Isso não garante ausência de defeitos não treinados." }
+                else -> { finalStatus = Status.OK; reason = "Produto conforme — sem avarias detectadas." }
             }
             val score = if (frameCount > 0) maxSimilarity else 0f
             runOnUiThread {
                 val now = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
                 store.addInspection(Inspection(now, p.code, p.name, finalStatus.name, "Análise por vídeo: $reason", score, currentMeta.lot, currentMeta.machine, currentMeta.mold, currentMeta.cavity))
-                resultDialog(finalStatus, "Resultado da análise por vídeo", "$reason\n\nQuadros analisados: $frameCount\nMaior similaridade com o padrão: ${fmt(score)}\n\nA gravação é amostrada em quadros; defeitos muito pequenos, internos ou não cadastrados podem passar despercebidos. Confirme os casos críticos com o método de controle apropriado.")
+                val note = if(finalStatus == Status.OK) "\n\nA análise verifica os defeitos ensinados e não garante detectar defeitos não cadastrados." else ""
+                resultDialog(finalStatus, "Resultado da inspeção 360°", "$reason\nQuadros analisados: $frameCount$note")
                 try { File(path).delete() } catch (_: Exception) {}
             }
         }.start()

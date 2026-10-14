@@ -31,3 +31,11 @@ A grade é uma sobreposição visual de referência; ela não representa, por si
 - As dimensões mostradas são estimativas dependentes de calibração, distância, perspectiva e plano da peça. Para cotas industriais críticas, confirme com instrumento calibrado.
 
 O APK não foi compilado nem validado em aparelho nesta entrega. Execute o GitHub Actions do repositório para verificar a compilação e teste com amostras conhecidas antes de uso produtivo.
+
+## Atualização: ensino de não conformidade e resultados simplificados
+
+- No detalhe do produto, use **Criar padrão de NÃO CONFORMIDADE** para cadastrar um defeito, por exemplo Rebarba, Risco ou Trinca.
+- Abra o defeito cadastrado para ensinar com foto da câmera, imagem da galeria/Google Fotos e gravação 360°.
+- Grave a peça com defeito dando uma volta completa e mostrando diferentes ângulos; os quadros do vídeo são adicionados aos exemplos desse defeito.
+- Os resultados foram simplificados para **“Produto não conforme — defeito identificado: Rebarba.”**, **“Produto conforme — sem avarias detectadas.”** ou **“Resultado inconclusivo — avaliar a peça.”**
+- A classificação depende das amostras reais cadastradas e deve ser validada antes de uso industrial. A mensagem “conforme” significa que os defeitos ensinados não foram reconhecidos, não que seja impossível haver defeitos não cadastrados.

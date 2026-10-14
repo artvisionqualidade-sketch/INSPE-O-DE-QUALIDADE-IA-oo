@@ -568,9 +568,9 @@ private data class LiveModel(val references: List<List<Float>>, val defects: Lis
                 if (confidence >= d.threshold) d.name to (confidence to d.critical) else null
             }
         }
-        if (hits.isNotEmpty()) return "BAD" to "Possível defeito: ${hits.joinToString { "${it.first} (${(it.second.first * 100).toInt()}%)" }}."
+        if (hits.isNotEmpty()) return "BAD" to "Produto não conforme — defeito identificado: ${hits.joinToString { it.first }}."
         if (similarity < .60f) return "ATTENTION" to "Semelhança baixa com padrão (${(similarity * 100).toInt()}%); confira a peça."
-        return "OK" to "Nenhum defeito configurado reconhecido neste quadro (${(similarity * 100).toInt()}% de similaridade)."
+        return "OK" to "Produto conforme — sem avarias detectadas."
     }
     companion object {
         fun empty() = LiveModel(emptyList(), emptyList())
