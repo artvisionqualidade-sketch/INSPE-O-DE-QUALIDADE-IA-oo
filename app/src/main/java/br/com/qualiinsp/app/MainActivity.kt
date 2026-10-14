@@ -189,7 +189,10 @@ class MainActivity : AppCompatActivity() {
         root=base("Produtos e padrões")
         button("＋ Cadastrar produto"){showRegister()}
         val ps=store.products(); if(ps.isEmpty()) addText("Nenhum produto cadastrado.")
-        ps.forEach{p->button("${p.code} — ${p.name}\nDefeitos configurados: ${p.defects.size}"){selectedProduct=p;showProductDetail(p)}}
+        ps.forEach{p->
+            button("${p.code} — ${p.name}\nDefeitos configurados: ${p.defects.size}"){selectedProduct=p;showProductDetail(p)}
+            button("🎥 OPÇÕES DE INSPEÇÃO 360° — ${p.name}"){selectedProduct=p;showInspectionFor(p)}
+        }
         back()
     }
 
@@ -209,12 +212,14 @@ class MainActivity : AppCompatActivity() {
         val p=store.getProduct(p0.id) ?: p0
         root=base("${p.code} — ${p.name}")
         addText("Padrão: ${if(p.standardFile.isNotEmpty()) "cadastrado" else "não cadastrado"}\nDefeitos configurados: ${p.defects.size}")
+        addText("GRAVAÇÃO 360° — mostre frente, verso, laterais, topo, base e detalhes.", 14)
+        button("🎥 GRAVAR PADRÃO CONFORME EM 360°"){selectedProduct=p;launchVideoTraining("train_ok", null)}
+        button("🎥 GRAVAR PRODUTO EM 360° E INSPECIONAR TODOS OS ÂNGULOS"){selectedProduct=p;showInspectionFor(p)}
         button("＋ Configurar novo defeito"){showDefectEditor(p,null)}
         if(p.defects.isEmpty()) addText("Ainda não há defeitos configurados. Crie um defeito e depois ensine a IA com exemplos reais.")
         p.defects.forEach{d->button("${if(d.critical) "🔴" else "🟡"} ${d.name}\nExemplos: ${d.samples.size} • Tolerância ou Limite: ${d.threshold}"){showDefectEditor(p,d)}}
         button("📷 Ensinar CONFORME (câmera)"){selectedProduct=p;captureAction="train_ok";requestCamera()}
         button("🖼️ Ensinar CONFORME (galeria / Google Fotos)"){selectedProduct=p;captureAction="train_ok";chooseGallery()}
-        button("🎥 Gravar padrão CONFORME em 360°"){selectedProduct=p;launchVideoTraining("train_ok", null)}
         button("🔎 Inspecionar este produto"){selectedProduct=p;showInspectionFor(p)}
         back()
     }
